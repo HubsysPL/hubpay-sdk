@@ -4,7 +4,12 @@ on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Numer wersji (bez v) — np. 1.0.1. Puste = data YYYY.MM.DD.'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -19,20 +24,26 @@ jobs:
 
       - name: Compute version
         id: version
+        env:
+          GITHUB_REF_TYPE: ${{ github.ref_type }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
+          elif [[ -n "${INPUT_VERSION}" ]]; then
+            VERSION="${INPUT_VERSION}"
           else
             VERSION="$(date +%Y.%m.%d)"
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Prepare ZIP archive
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
           mkdir -p "hubpay-sdk-v${VERSION}"
-          # Copy everything EXCEPT the workflow itself and dotfiles (.git, .github)
-          # rsync is convenient; fall back to cp -r if rsync is missing on the runner.
           if command -v rsync >/dev/null 2>&1; then
             rsync -a --exclude='.git' --exclude='.github' --exclude='hubpay-sdk-v*' ./ "hubpay-sdk-v${VERSION}/"
           else
@@ -40,35 +51,33 @@ jobs:
               ! -name '.git' ! -name '.github' ! -name 'hubpay-sdk-v*' \
               -exec cp -r {} "hubpay-sdk-v${VERSION}/" \;
           fi
-          # Normalize permissions inside the archive
           find "hubpay-sdk-v${VERSION}" -type d -exec chmod 0755 {} \;
           find "hubpay-sdk-v${VERSION}" -type f -exec chmod 0644 {} \;
           zip -r "hubpay-sdk-v${VERSION}.zip" "hubpay-sdk-v${VERSION}"
           echo "ZIP size: $(du -h "hubpay-sdk-v${VERSION}.zip" | cut -f1)"
 
-      - name: Read CHANGELOG for tag
+      - name: Extract CHANGELOG section for this version
         id: changelog
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          # Extract the section for this version from CHANGELOG.md (## [X.Y.Z] ...)
           awk -v ver="$VERSION" '
             /^## \[/ { in_section = ($0 ~ "\\[" ver "\\]"); next }
             in_section { print }
           ' CHANGELOG.md > /tmp/release-notes.md
           if [[ ! -s /tmp/release-notes.md ]]; then
-            echo "Brak sekcji dla v${VERSION} w CHANGELOG.md — używam domyślnego opisu." > /tmp/release-notes.md
-            echo "" >> /tmp/release-notes.md
-            echo "Zobacz CHANGELOG.md po pełną listę zmian." >> /tmp/release-notes.md
+            {
+              echo "Brak sekcji dla v${VERSION} w CHANGELOG.md — zobacz CHANGELOG.md po pełną listę zmian."
+            } > /tmp/release-notes.md
           fi
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          name: "HubPay PHP SDK v${{ steps.version.outputs.version }}"
-          body_path: /tmp/release-notes.md
-          files: "hubpay-sdk-v${{ steps.version.outputs.version }}.zip"
-          draft: false
-          prerelease: false
-          generate_release_notes: true
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "v${VERSION}" \
+            --title "HubPay PHP SDK v${VERSION}" \
+            --notes-file /tmp/release-notes.md \
+            "hubpay-sdk-v${VERSION}.zip" \
+            --target main
